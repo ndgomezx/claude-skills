@@ -1,155 +1,173 @@
 ---
 name: engram
-description: Semantic search and memory management for a local knowledge base using Pinecone vector database and Gemini embeddings. Use when the user wants to store notes, retrieve past context, search their knowledge base, or build persistent memory across sessions.
+description: >
+  Memoria persistente para agentes de IA. Guarda decisiones, bugfixes,
+  patrones y contexto entre sesiones usando SQLite local + FTS5.
+  Sin servicios externos, sin API keys, sin costo por uso.
+  Trigger: cuando el usuario pide recordar algo, guardar contexto, o
+  buscar trabajo pasado.
 triggers:
-  - "busca en mis notas"
   - "recuerda que"
-  - "agrega esto a mi base de conocimiento"
-  - "¿qué sé sobre"
   - "guarda esto"
-  - "search my knowledge"
+  - "¿qué sé sobre"
+  - "¿qué hicimos con"
+  - "acordate de"
+  - "busca en la memoria"
+  - "¿cómo resolvimos"
+  - "recuérdame lo de"
   - "remember that"
-  - "add to knowledge base"
-  - "what do I know about"
-  - "retrieve context about"
+  - "save this"
+  - "what do we know about"
+  - "how did we solve"
+  - "recall"
+license: Apache-2.0
+metadata:
+  source: https://github.com/Gentleman-Programming/engram
+  version: "1.0"
 ---
 
-# engram — Semantic Knowledge Base (Claude Code)
+# engram — Memoria Persistente Local (Claude Code)
 
-Motor de memoria persistente usando **Pinecone** (vector store) y **Gemini** (embeddings). Permite almacenar, buscar y gestionar notas y contexto entre sesiones.
+Binario Go con SQLite + FTS5. Sin Pinecone, sin Gemini, sin red.
+Todo queda en `~/.engram/engram.db`.
 
-## Prerequisitos
-
-El MCP `engram` debe estar configurado en `~/.claude/settings.json` con las claves de API:
-
-```json
-{
-  "mcpServers": {
-    "engram": {
-      "command": "npx",
-      "args": ["-y", "@openclaw/engram-mcp"],
-      "env": {
-        "PINECONE_API_KEY": "<tu-clave-pinecone>",
-        "PINECONE_INDEX": "<nombre-del-indice>",
-        "GEMINI_API_KEY": "<tu-clave-gemini>"
-      }
-    }
-  }
-}
+```
+Claude Code → MCP stdio → engram binary → SQLite (~/.engram/engram.db)
 ```
 
-## Herramientas MCP disponibles
+## Instalación
 
-| Herramienta | Descripción |
+```bash
+# macOS
+brew install gentleman-programming/tap/engram
+
+# Configurar en Claude Code (una sola vez)
+claude plugin marketplace add Gentleman-Programming/engram && claude plugin install engram
+```
+
+Otros métodos → https://github.com/Gentleman-Programming/engram/blob/main/docs/INSTALLATION.md
+
+---
+
+## Herramientas MCP (19)
+
+| Categoría | Herramientas |
 |---|---|
-| `mcp__engram__search` | Búsqueda semántica en la base de conocimiento |
-| `mcp__engram__upsert` | Agregar o actualizar un documento |
-| `mcp__engram__delete` | Eliminar un documento por ID |
-| `mcp__engram__list` | Listar documentos en un namespace |
-| `mcp__engram__namespaces` | Listar namespaces disponibles |
+| Guardar / Editar | `mem_save`, `mem_update`, `mem_delete`, `mem_suggest_topic_key` |
+| Buscar / Recuperar | `mem_search`, `mem_context`, `mem_timeline`, `mem_get_observation` |
+| Ciclo de sesión | `mem_session_start`, `mem_session_end`, `mem_session_summary` |
+| Conflictos | `mem_judge`, `mem_compare` |
+| Utilidades | `mem_save_prompt`, `mem_stats`, `mem_capture_passive`, `mem_merge_projects`, `mem_current_project`, `mem_doctor` |
 
-## Disparadores — cuándo usar esta skill
+---
+
+## Disparadores — cuándo actuar
 
 Activa esta skill cuando el usuario:
-- Pide buscar en sus notas, memoria o base de conocimiento
-- Quiere guardar contexto, decisiones técnicas, o aprendizajes
-- Pregunta "¿qué sé sobre X?" o "recuérdame lo de Y"
-- Necesita contexto de sesiones anteriores
-- Quiere indexar documentación, decisiones o fragmentos de código
+- Pide guardar una decisión, bugfix, patrón o aprendizaje
+- Pregunta "¿qué hicimos con X?", "¿cómo resolvimos Y?", "recordame lo de Z"
+- Menciona un tema sin dar contexto — buscar primero en memoria
+- Comienza a trabajar en algo que puede haberse hecho antes
+- Cierra una sesión o dice "terminamos por hoy"
+
+---
 
 ## Pasos para Claude
 
-### 1. Buscar (search)
+### Al iniciar sesión
 ```
-usuario: "busca lo que sé sobre autenticación JWT"
-
-→ Llamar: mcp__engram__search(
-    query="autenticación JWT",
-    top_k=5,
-    namespace="default"
-  )
-→ Presentar resultados con su score de relevancia
-→ Si score < 0.5: indicar que no hay resultados confiables
+1. Llamar mem_current_project → detecta el proyecto activo
+2. Llamar mem_context          → recupera contexto de sesiones anteriores
+3. Si el usuario menciona un tema concreto → mem_search con esas palabras
 ```
 
-### 2. Guardar (upsert)
-```
-usuario: "guarda esto: usamos RS256 para JWT porque el equipo de seguridad lo requiere"
+### Guardar memoria (mem_save)
+Llamar INMEDIATAMENTE después de cualquiera de estos eventos:
+- Bugfix completado
+- Decisión de arquitectura o diseño
+- Descubrimiento no obvio del codebase
+- Cambio de configuración
+- Patrón establecido (nombres, estructura, convención)
+- Preferencia o restricción del usuario
 
-→ Generar ID descriptivo: "jwt-rs256-decision-<timestamp>"
-→ Llamar: mcp__engram__upsert(
-    id="jwt-rs256-decision-1717488000",
-    text="Usamos RS256 para JWT porque el equipo de seguridad lo requiere.",
-    metadata={
-      "type": "decision",
-      "topic": "autenticación",
-      "date": "<fecha-actual>"
-    },
-    namespace="default"
-  )
-→ Confirmar con el usuario
+**Formato obligatorio:**
 ```
-
-### 3. Eliminar (delete)
-```
-usuario: "elimina la nota sobre JWT RS256"
-
-→ Primero buscar: mcp__engram__search(query="JWT RS256", top_k=3)
-→ Mostrar al usuario qué documentos se encontraron
-→ CONFIRMAR antes de eliminar
-→ Llamar: mcp__engram__delete(id="<id-confirmado>")
+title:    Verbo + qué (corto y buscable, ej: "Fijé N+1 en UserList")
+type:     bugfix | decision | architecture | discovery | pattern | config | preference
+scope:    project (default) | personal | global
+topic_key: (opcional) clave estable para temas evolutivos, ej: "architecture/auth-model"
+content:
+  **What**: Una oración — qué se hizo
+  **Why**: Qué lo motivó (bug, rendimiento, pedido del usuario)
+  **Where**: Archivos o rutas afectadas
+  **Learned**: Gotchas, edge cases, sorpresas (omitir si no hay)
 ```
 
-### 4. Listar
+**Reglas de topic_key:**
+- Temas distintos nunca deben sobreescribirse entre sí
+- Reusar el mismo `topic_key` para actualizar un tema en evolución (evita duplicados)
+- Si no estás seguro del key → llamar `mem_suggest_topic_key` primero
+- Si tenés el ID exacto → usar `mem_update` en lugar de `mem_save`
+
+### Buscar memoria
 ```
-usuario: "¿qué tengo guardado en mi base de conocimiento?"
+usuario: "¿cómo resolvimos el bug de autenticación?"
 
-→ Llamar: mcp__engram__list(namespace="default", limit=50)
-→ Agrupar por metadata.type si está disponible
+1. mem_context   → contexto de sesiones recientes (rápido)
+2. Si no encontró → mem_search(query="bug autenticación")
+3. Si encontró ID relevante → mem_get_observation(id) para contenido completo
+4. Si mem_save devuelve candidates[] con judgment_required: true
+   → inspeccionar candidatos y llamar mem_judge con el veredicto
 ```
 
-## Namespaces recomendados
+### Búsqueda proactiva
+```
+Antes de empezar trabajo que pudo haberse hecho antes:
+→ mem_search(query="<tema>", all_projects=false)
+→ Si hay resultados, informarlos al usuario antes de continuar
+```
 
-| Namespace | Uso |
+### Cerrar sesión (OBLIGATORIO antes de "listo" / "terminamos")
+```
+mem_session_summary con:
+  ## Goal          — objetivo de la sesión
+  ## Instructions  — restricciones o contexto que dio el usuario
+  ## Discoveries   — hallazgos importantes
+  ## Accomplished  — qué se completó
+  ## Next Steps    — pendientes
+  ## Relevant Files — archivos clave modificados o leídos
+```
+
+---
+
+## Tipos de observación
+
+| type | Cuándo usarlo |
 |---|---|
-| `default` | Notas generales |
-| `decisions` | Decisiones técnicas del proyecto |
-| `code` | Fragmentos de código importantes |
-| `research` | Investigación y referencias |
-| `personal` | Contexto personal del usuario |
+| `decision` | Elegimos X en lugar de Y |
+| `architecture` | Estructura del sistema, patrones de diseño |
+| `bugfix` | Causa raíz de un bug y cómo se arregló |
+| `discovery` | Algo no obvio encontrado en el codebase |
+| `pattern` | Convención o patrón establecido |
+| `config` | Setup, variables de entorno, herramientas |
+| `preference` | Preferencia o restricción del usuario |
 
-## Reglas importantes
+## Scopes
 
-1. **Nunca eliminar sin confirmar** — siempre mostrar al usuario qué se va a borrar.
-2. **Scores bajos** (< 0.5): indicar explícitamente que la búsqueda no encontró coincidencias confiables.
-3. **IDs descriptivos**: usar formato `<topic>-<subtopic>-<timestamp>` para facilitar gestión.
-4. **Metadata siempre**: incluir al menos `type` y `date` al hacer upsert.
-5. **Límite de contexto**: si hay muchos resultados, priorizar los de mayor score.
+| scope | Uso |
+|---|---|
+| `project` | Específico de este repositorio (default) |
+| `personal` | Preferencias del usuario, independiente del proyecto |
+| `global` | Decisiones que aplican a todos los proyectos |
+
+---
 
 ## ⚠️ Riesgos de uso
 
-### Privacidad y datos
-- **Riesgo alto**: todo el texto se envía a Pinecone (EE.UU.) y Gemini (Google) para generar embeddings. No guardar datos sensibles: contraseñas, tokens, datos personales de terceros, información confidencial de clientes.
-- Los embeddings son difíciles de "desindexar" completamente; asumir que los datos persisten.
+Ver [RISKS.md](RISKS.md) para análisis completo.
 
-### Costos de API
-- Gemini cobra por embedding (por token). Documentos grandes o upserts frecuentes pueden generar costos inesperados.
-- Pinecone tiene límites en el plan gratuito (1 índice, 100K vectores). Superar el límite puede causar errores silenciosos.
-
-### Confiabilidad de resultados
-- La búsqueda semántica NO es búsqueda exacta. Puede devolver resultados relevantes pero con contexto incorrecto.
-- Scores altos no garantizan que la información sea correcta o actual.
-- No usar como única fuente de verdad — siempre validar contra el código o documentación original.
-
-### Seguridad de claves
-- Las claves `PINECONE_API_KEY` y `GEMINI_API_KEY` se almacenan en `settings.json` en texto plano.
-- No compartir `settings.json` ni subirlo a repositorios públicos.
-- Rotar claves si el archivo se expone accidentalmente.
-
-### Consistencia de datos
-- No hay versionado de documentos. Un `upsert` sobreescribe silenciosamente el documento anterior con el mismo ID.
-- Si dos sesiones escriben con el mismo ID simultáneamente, puede haber pérdida de datos.
-
-### Dependencia de servicios externos
-- Si Pinecone o Gemini están caídos, la skill falla completamente.
-- No hay fallback local — sin red, sin memoria.
+**Resumen rápido:**
+- El archivo `~/.engram/engram.db` contiene toda la memoria — hacer backup
+- No guardar datos sensibles: contraseñas, tokens, PII (aunque es local, puede sincronizarse)
+- La búsqueda FTS5 es exacta por palabras, no semántica — buscar con sinónimos si falla
+- Conflictos entre memorias deben resolverse con `mem_judge` para mantener coherencia

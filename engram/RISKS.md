@@ -1,116 +1,144 @@
-# Riesgos de uso — engram
+# Riesgos de uso — engram (Gentleman-Programming)
+
+> Versión: binario Go + SQLite local. Sin Pinecone, sin Gemini, sin servicios cloud obligatorios.
 
 ## Resumen ejecutivo
 
-engram conecta Claude Code con Pinecone y Google Gemini para memoria semántica persistente. Esto introduce dependencias de servicios externos y puntos de riesgo que el equipo debe evaluar antes de adoptar la herramienta.
+engram es local-first: toda la memoria vive en `~/.engram/engram.db`. Esto elimina los riesgos de privacidad del cloud, pero introduce riesgos propios de gestión de archivos locales, integridad de datos y sincronización opcional.
 
 ---
 
-## 1. Privacidad y fuga de datos
+## 1. Pérdida de datos
 
 | Riesgo | Severidad | Probabilidad |
 |---|---|---|
-| Datos sensibles indexados en Pinecone (EE.UU.) | Alta | Media |
-| Textos enviados a Gemini para embedding | Alta | Alta (siempre) |
-| Claves API en texto plano en `settings.json` | Alta | Alta |
-
-**Mitigaciones:**
-- Establecer una política de qué datos pueden guardarse (nunca: PII, tokens, contraseñas, datos de clientes).
-- Usar variables de entorno del sistema en lugar de `settings.json` si es posible.
-- Revisar periódicamente qué está indexado con `mcp__engram__list`.
-
----
-
-## 2. Costos de API
-
-| Servicio | Modelo de costo | Riesgo |
-|---|---|---|
-| Gemini Embeddings | Por token enviado | Documentos grandes o upserts masivos |
-| Pinecone | Por vectores almacenados + consultas | Plan gratuito: 100K vectores |
-
-**Mitigaciones:**
-- Establecer límites de uso en las consolas de Pinecone y Google AI Studio.
-- Evitar upserts automáticos sin control (p.ej. no indexar conversaciones enteras).
-- Monitorear el uso mensual.
-
----
-
-## 3. Confiabilidad de resultados
-
-La búsqueda semántica devuelve documentos **similares**, no necesariamente **correctos**:
-
-- Un score de 0.9 significa similitud vectorial, no veracidad.
-- Información desactualizada puede rankearse más alta que información reciente.
-- Namespace equivocado puede devolver resultados de otro proyecto.
-
-**Mitigaciones:**
-- Siempre incluir `date` en metadata para detectar información obsoleta.
-- Tratar los resultados como hints, no como hechos.
-- Validar contra el código o documentación primaria.
-
----
-
-## 4. Seguridad de claves
-
-El archivo `~/.claude/settings.json` almacena las claves en texto plano.
-
-**Vectores de ataque:**
-- Malware con acceso al sistema de archivos.
-- Accidental commit del archivo a un repositorio.
-- Compartir la pantalla o el archivo con terceros.
+| Corrupción de `engram.db` por fallo de disco | Alta | Baja |
+| Borrado accidental con `mem_delete` (hard delete) | Alta | Media |
+| Pérdida al migrar de equipo sin hacer sync | Media | Media |
 
 **Mitigaciones:**
 ```bash
-# Permisos restrictivos en el archivo
-chmod 600 ~/.claude/settings.json
+# Backup manual del archivo de base de datos
+cp ~/.engram/engram.db ~/.engram/engram.db.bak
 
-# Agregar al .gitignore global
-echo "settings.json" >> ~/.gitignore_global
-git config --global core.excludesfile ~/.gitignore_global
+# Usar git sync incorporado para replicar entre máquinas
+engram sync
+git add .engram/ && git commit -m "sync engram memories"
+```
+- Preferir `mem_delete` sin `hard=true` (soft delete, recuperable)
+- Exportar periódicamente: `GET /export` o desde el TUI
+
+---
+
+## 2. Privacidad local
+
+Aunque los datos no salen de tu máquina por defecto:
+
+- El archivo `engram.db` es legible por cualquier proceso con acceso al home del usuario
+- Si usas **Engram Cloud** (opcional), las memorias se replican a servidores externos
+- El **git sync** sube memorias comprimidas al repositorio — si el repo es público, las memorias quedan expuestas
+
+**Mitigaciones:**
+```bash
+chmod 600 ~/.engram/engram.db
+# Si usas git sync, asegurarte de que el repo sea privado
+# Agregar .engram/ a .gitignore si no querés sincronizar
 ```
 
 ---
 
-## 5. Consistencia de datos
+## 3. Confiabilidad de la búsqueda
 
-- **Sin versionado**: un `upsert` con el mismo ID sobreescribe sin historial.
-- **Sin transacciones**: si el proceso falla a mitad de un upsert masivo, el índice queda en estado inconsistente.
-- **Sin confirmación de escritura**: Pinecone puede tardar segundos en hacer disponible un vector recién insertado.
+FTS5 es búsqueda **full-text exacta**, no semántica:
+
+- Buscar "autenticación" NO encuentra notas que digan "auth" o "login"
+- Buscar "JWT" NO encuentra notas sobre "tokens" si no usan esa palabra
+- Sinónimos o abreviaturas requieren múltiples búsquedas
 
 **Mitigaciones:**
-- Usar IDs con timestamp para evitar sobreescrituras accidentales.
-- Hacer backups periódicos exportando con `mcp__engram__list`.
+- Usar títulos descriptivos con palabras clave al guardar (`mem_save`)
+- Si la primera búsqueda falla, intentar con sinónimos o términos alternativos
+- Usar `mem_context` primero (basado en proyecto/sesión, más tolerante)
 
 ---
 
-## 6. Dependencia de servicios externos
+## 4. Consistencia de memorias (conflictos)
 
-Si Pinecone o Gemini están caídos:
-- La skill falla completamente (sin fallback local).
-- Claude no puede recuperar contexto de sesiones anteriores.
-- Los errores pueden no ser informativos para el usuario.
+- `mem_save` con el mismo `topic_key` sobreescribe el contenido anterior (incrementa `revision_count`)
+- Dos agentes o sesiones guardando información contradictoria generan `candidates[]` con `judgment_required: true`
+- Sin llamar `mem_judge`, los conflictos quedan como `pending` y contaminan los resultados de búsqueda con anotaciones `conflict: contested by #<id>`
 
 **Mitigaciones:**
-- Documentar decisiones importantes también en archivos locales (CLAUDE.md, ADRs).
-- No depender de engram como única fuente de memoria para información crítica.
+- Siempre resolver los `judgment_required: true` con `mem_judge`
+- Si el confidence es < 0.7, preguntar al usuario antes de juzgar
+- Usar `mem_compare` para análisis semántico proactivo entre memorias relacionadas
 
 ---
 
-## 7. Riesgo de vendor lock-in
+## 5. Crecimiento del archivo de base de datos
 
-Los embeddings de Gemini no son compatibles directamente con embeddings de otros modelos (OpenAI, Cohere, etc.). Migrar a otro proveedor requiere re-indexar todo el contenido.
+- Cada sesión, observación y prompt se acumula indefinidamente
+- Sin limpieza periódica, `engram.db` puede volverse grande con el tiempo
+- Las soft-deleted observations ocupan espacio hasta que se hard-delete o compactan
+
+**Mitigaciones:**
+```bash
+engram tui  # revisar y limpiar memorias obsoletas visualmente
+mem_stats   # monitorear cantidad de observaciones por proyecto
+```
+
+---
+
+## 6. Disponibilidad del binario
+
+- Si el binario `engram` no está instalado o actualizado, el MCP falla completamente
+- Actualizaciones de engram pueden cambiar el esquema de SQLite (migraciones automáticas, pero posible downtime)
+
+**Mitigaciones:**
+```bash
+# Verificar que engram está corriendo
+mem_doctor
+
+# Mantener actualizado
+brew upgrade engram
+```
+
+---
+
+## 7. Engram Cloud (opcional) — riesgos adicionales
+
+Si se habilita la sincronización cloud:
+
+| Riesgo | Descripción |
+|---|---|
+| Datos en servidores externos | Las memorias se replican a la infraestructura de Gentleman-Programming |
+| Mutaciones cross-machine | Otro agente en otra máquina puede sobreescribir memorias |
+| Dependencia de disponibilidad | Si el cloud está caído, la sincronización falla (pero lo local sigue funcionando) |
+
+---
+
+## Evaluación comparativa vs. engram (Pinecone/Gemini)
+
+| | Esta versión (SQLite local) | Versión Pinecone/Gemini |
+|---|---|---|
+| Privacidad | Alta — todo local | Baja — datos a EE.UU. |
+| Costo | Gratis | Por token/consulta |
+| Tipo de búsqueda | FTS5 full-text exacta | Semántica por vectores |
+| Disponibilidad offline | Total | Ninguna |
+| Riesgo de pérdida | Backup manual necesario | Pinecone lo gestiona |
+| Dependencias | Binario Go (cero deps) | Node.js + APIs externas |
 
 ---
 
 ## Evaluación de riesgo general
 
 ```
-Privacidad:      ████████░░  Alto
-Costos:          █████░░░░░  Medio
-Confiabilidad:   ██████░░░░  Medio-Alto
-Seguridad:       ███████░░░  Alto
-Consistencia:    ████░░░░░░  Medio
-Disponibilidad:  █████░░░░░  Medio
+Pérdida de datos:    ████░░░░░░  Medio (mitigable con backup)
+Privacidad local:    ██░░░░░░░░  Bajo (datos en tu máquina)
+Privacidad cloud:    ██████░░░░  Medio-Alto (si se habilita sync)
+Confiabilidad FTS5:  ███░░░░░░░  Bajo-Medio (búsqueda exacta)
+Conflictos memoria:  ████░░░░░░  Medio (requiere discipline)
+Crecimiento DB:      ██░░░░░░░░  Bajo (gestionable con TUI)
 ```
 
-**Recomendación**: Apropiado para uso personal o en equipos con datos no sensibles. Evaluar antes de usar con datos de clientes o información confidencial del negocio.
+**Recomendación**: Apropiado para cualquier proyecto, incluidos datos sensibles, siempre que no se habilite la sincronización cloud con repositorios públicos. Hacer backup periódico de `~/.engram/engram.db`.

@@ -1,131 +1,143 @@
 #!/usr/bin/env python3
 """
-engram setup helper — verifica configuración del MCP y conectividad con Pinecone/Gemini.
-Uso: python3 setup.py [--check | --configure | --test-search "query"]
+engram setup helper — verifica instalación del binario y estado del MCP.
+Uso: python3 setup.py [--check | --install-instructions | --status]
 """
 
 import argparse
 import json
-import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-MCP_NAME = "engram"
+DB_PATH = Path.home() / ".engram" / "engram.db"
 
 
-def load_settings():
-    if not SETTINGS_PATH.exists():
-        return {}
-    with open(SETTINGS_PATH) as f:
-        return json.load(f)
-
-
-def save_settings(settings: dict):
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_PATH, "w") as f:
-        json.dump(settings, f, indent=4)
-
-
-def check_config():
-    settings = load_settings()
-    mcp_servers = settings.get("mcpServers", {})
-
-    if MCP_NAME not in mcp_servers:
-        print(f"[ERROR] El MCP '{MCP_NAME}' no está configurado en {SETTINGS_PATH}")
-        print("Ejecuta: python3 setup.py --configure")
-        return False
-
-    engram_cfg = mcp_servers[MCP_NAME]
-    env = engram_cfg.get("env", {})
-    missing = []
-
-    for key in ["PINECONE_API_KEY", "PINECONE_INDEX", "GEMINI_API_KEY"]:
-        if not env.get(key):
-            missing.append(key)
-
-    if missing:
-        print(f"[ERROR] Faltan variables de entorno: {', '.join(missing)}")
-        return False
-
-    print("[OK] Configuración de engram encontrada.")
-    print(f"     Índice Pinecone: {env['PINECONE_INDEX']}")
-    print(f"     Gemini API Key:  {'*' * 8}{env['GEMINI_API_KEY'][-4:]}")
-    return True
-
-
-def configure():
-    print("=== Configuración de engram ===\n")
-    pinecone_key = input("PINECONE_API_KEY: ").strip()
-    pinecone_index = input("PINECONE_INDEX (nombre del índice): ").strip()
-    gemini_key = input("GEMINI_API_KEY: ").strip()
-
-    if not all([pinecone_key, pinecone_index, gemini_key]):
-        print("[ERROR] Todos los campos son obligatorios.")
-        sys.exit(1)
-
-    settings = load_settings()
-    if "mcpServers" not in settings:
-        settings["mcpServers"] = {}
-
-    settings["mcpServers"][MCP_NAME] = {
-        "command": "npx",
-        "args": ["-y", "@openclaw/engram-mcp"],
-        "env": {
-            "PINECONE_API_KEY": pinecone_key,
-            "PINECONE_INDEX": pinecone_index,
-            "GEMINI_API_KEY": gemini_key,
-        },
-    }
-
-    save_settings(settings)
-    print(f"\n[OK] Configuración guardada en {SETTINGS_PATH}")
-    print("[!]  Reinicia Claude Code para que los cambios surtan efecto.")
-    print("\n⚠️  AVISO DE SEGURIDAD:")
-    print("     Las claves se almacenan en texto plano.")
-    print(f"     No compartas {SETTINGS_PATH} ni lo subas a un repositorio.")
-
-
-def test_connectivity():
-    """Verifica conectividad básica con los servicios externos."""
-    try:
-        import urllib.request
-        import urllib.error
-    except ImportError:
-        print("[ERROR] No se puede importar urllib.")
-        return
-
-    endpoints = {
-        "Pinecone": "https://api.pinecone.io",
-        "Gemini": "https://generativelanguage.googleapis.com",
-    }
-
-    for name, url in endpoints.items():
+def check_binary():
+    path = shutil.which("engram")
+    if path:
         try:
-            urllib.request.urlopen(url, timeout=5)
-            print(f"[OK] {name}: accesible")
-        except urllib.error.HTTPError as e:
-            # HTTP error = servidor respondió (conectividad OK)
-            print(f"[OK] {name}: accesible (HTTP {e.code})")
+            result = subprocess.run(["engram", "version"], capture_output=True, text=True, timeout=5)
+            version = result.stdout.strip() or result.stderr.strip()
+            print(f"[OK] engram binary: {path}")
+            print(f"     Versión: {version}")
+            return True
         except Exception as e:
-            print(f"[FAIL] {name}: no accesible — {e}")
+            print(f"[WARN] engram encontrado en {path} pero no responde: {e}")
+            return False
+    else:
+        print("[ERROR] engram no está instalado o no está en el PATH.")
+        return False
+
+
+def check_database():
+    if DB_PATH.exists():
+        size_kb = DB_PATH.stat().st_size // 1024
+        print(f"[OK] Base de datos: {DB_PATH} ({size_kb} KB)")
+        return True
+    else:
+        print(f"[INFO] Base de datos no encontrada en {DB_PATH}")
+        print("       Se crea automáticamente al usar engram por primera vez.")
+        return False
+
+
+def check_plugin():
+    """Verifica si el plugin de Claude Code está configurado."""
+    plugin_paths = [
+        Path.home() / ".claude" / "plugins" / "engram",
+        Path.home() / ".claude-code" / "plugins" / "engram",
+    ]
+    for p in plugin_paths:
+        if p.exists():
+            print(f"[OK] Plugin Claude Code: {p}")
+            return True
+
+    settings = {}
+    if SETTINGS_PATH.exists():
+        with open(SETTINGS_PATH) as f:
+            settings = json.load(f)
+
+    mcp_servers = settings.get("mcpServers", {})
+    if "engram" in mcp_servers:
+        print("[OK] MCP engram configurado en settings.json")
+        return True
+
+    print("[WARN] Plugin engram no detectado en Claude Code.")
+    print("       Ejecuta: claude plugin marketplace add Gentleman-Programming/engram")
+    print("                claude plugin install engram")
+    return False
+
+
+def check_all():
+    print("=== Estado de engram ===\n")
+    binary_ok = check_binary()
+    print()
+    db_ok = check_database()
+    print()
+    plugin_ok = check_plugin()
+    print()
+
+    if binary_ok and plugin_ok:
+        print("[OK] engram listo para usar.")
+    elif not binary_ok:
+        print("[ACTION] Instalar engram primero (ver --install-instructions).")
+    elif not plugin_ok:
+        print("[ACTION] Configurar el plugin en Claude Code.")
+
+    return binary_ok and plugin_ok
+
+
+def install_instructions():
+    print("=== Instrucciones de instalación de engram ===\n")
+    print("1. Instalar el binario:")
+    print()
+    print("   macOS (Homebrew):")
+    print("     brew install gentleman-programming/tap/engram")
+    print()
+    print("   Linux / Windows / otros métodos:")
+    print("     https://github.com/Gentleman-Programming/engram/blob/main/docs/INSTALLATION.md")
+    print()
+    print("2. Configurar en Claude Code:")
+    print("     claude plugin marketplace add Gentleman-Programming/engram")
+    print("     claude plugin install engram")
+    print()
+    print("3. Verificar:")
+    print("     python3 setup.py --check")
+    print()
+    print("4. (Opcional) TUI para explorar memorias:")
+    print("     engram tui")
+    print()
+    print("Repositorio: https://github.com/Gentleman-Programming/engram")
+
+
+def backup():
+    if not DB_PATH.exists():
+        print("[ERROR] No hay base de datos para respaldar.")
+        sys.exit(1)
+    import shutil as sh
+    from datetime import datetime
+    backup_path = DB_PATH.parent / f"engram.db.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    sh.copy2(DB_PATH, backup_path)
+    size_kb = backup_path.stat().st_size // 1024
+    print(f"[OK] Backup creado: {backup_path} ({size_kb} KB)")
 
 
 def main():
     parser = argparse.ArgumentParser(description="engram setup helper")
-    parser.add_argument("--check", action="store_true", help="Verifica la configuración actual")
-    parser.add_argument("--configure", action="store_true", help="Configura el MCP interactivamente")
-    parser.add_argument("--test-connectivity", action="store_true", help="Prueba conectividad con Pinecone y Gemini")
+    parser.add_argument("--check", action="store_true", help="Verifica instalación y estado")
+    parser.add_argument("--install-instructions", action="store_true", help="Muestra cómo instalar engram")
+    parser.add_argument("--backup", action="store_true", help="Crea un backup de engram.db")
     args = parser.parse_args()
 
-    if args.configure:
-        configure()
-    elif args.check:
-        ok = check_config()
-        if ok:
-            test_connectivity()
-    elif args.test_connectivity:
-        test_connectivity()
+    if args.check:
+        ok = check_all()
+        sys.exit(0 if ok else 1)
+    elif args.install_instructions:
+        install_instructions()
+    elif args.backup:
+        backup()
     else:
         parser.print_help()
 
